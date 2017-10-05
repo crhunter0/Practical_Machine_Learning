@@ -1,0 +1,163 @@
+---
+title: "Practical Machine Learning Project"
+author: "Chris Hunter"
+date: "September 26, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(caret)
+library(ggplot2)
+library(parallel)
+library(doParallel)
+library(randomForest)
+library(gbm)
+library(rpart)
+library(knitr)
+```
+## Synopsis
+This analysis will take data from wearable accelerometers and attempt to accurately predict whether test subjects performed dumbbell lifts correctly.  If the exercise was not performed properly, it will also attempt to predict the incorrect manner in which it was done.  Six participants each wore accelerometers on their belt, forearm, arm, and the actual dumbbell.  Each participant performed a set of 10 repetitions of Unilateral Dumbbell Bicep Curls in five different ways using a 1.25kg weight.  This resulted in the classe variable in which a value of A represents the exercise being done correctly.  Each incorrect exercise was given another letter value. This included B – elbows to the front, C – lifting dumbell halfway, D – lowering dumbell halfway, and E – throwing hips to the front. 
+    
+    
+## Data Analysis and Cleaning
+This data set has many variables of type numeric or int that look like useful accelerometer stats.  There are also variables with predominantly NA values as well as factor variables with divide-by-zero errors and a lot of blank values.  The data was first broken into training and test datasets. After that, all columns consisting of more than 90% NA or $DIV0 errors were removed.  These 2 checks ended up removing all NA's as well as the excessive blanks.  Other variables that would not be useful were also removed leaving actual measurements from the accelerometer and the outcome variable of classe.
+```{r}
+fulldata <- read.csv("/home/chris/pml-training.csv")
+
+inTrain = createDataPartition(fulldata$classe, p = .70)[[1]]
+
+training <- fulldata[inTrain,]
+testing <- fulldata[-inTrain,]
+
+train_na_cnt <- as.vector(0)
+for(i in 1:NCOL(training)) {
+    train_na_cnt[i] <- NROW(training[is.na(training[,i]),i])/NROW(training) > .90 |
+                       any(training[,i] == "#DIV/0!")
+}
+train_no_na <- training[,!train_na_cnt]
+train_fin <- train_no_na[,-c(1:7,37,38)] 
+
+test_no_na <- testing[,!train_na_cnt]
+test_fin <- test_no_na[,-c(1:7,37,38)]
+
+plot(training$classe, xlab = "classe variable values")
+title("Exercise Data Outcome Distribution")
+
+```
+    
+    
+## Model Selection
+Once the data was clean, several different models were trained using 10 fold cross-validation to try and find the most accurate method.  With the outcome variable consisting of 5 possible letter values, the models used were classification models.  These included a decision tree using the rpart2 method, random forest for ensembling many decision trees, and GBM for a boosting method.  The random forest model was clearly the most accurate with 99.2% training accuracy.  To try and improve on this number, a couple of other tuning options were attempted.  First, the top 20 predictors were determined and run through random forest again resulting in just a slightly lower accuracy of 99.1%.  Running random forest with PCA applied to these same predictors lowered the accuracy to 97%.  
+
+```{r train setup}
+
+cluster <- makeCluster(detectCores() - 1)
+registerDoParallel(cluster)
+
+fit_ctrl <- trainControl(method = "cv", number = 10, allowParallel = TRUE)
+
+```
+```{r rpart2}
+set.seed(123)
+fit_rpart2 <- train(classe ~ ., method="rpart2", data = train_fin, trControl=fit_ctrl)
+pred_rpart2 <- predict(fit_rpart2, newdata = test_fin)
+cm_rpart2 <- confusionMatrix(pred_rpart2, test_fin$classe)
+```
+
+```{r GBM, message=FALSE}
+set.seed(123)
+fit_gbm <- train(classe ~ ., method="gbm", data = train_fin, trControl= fit_ctrl)
+pred_gbm <- predict(fit_gbm, newdata = test_fin)
+cm_gbm <- confusionMatrix(pred_gbm,test_fin$classe)
+```
+
+```{r randomForest}
+set.seed(123)
+fit_rf <- train(classe ~ ., method="rf", data = train_fin, trControl= fit_ctrl)
+pred_rf <- predict(fit_rf, newdata = test_fin)
+cm_rf <- confusionMatrix(pred_rf,test_fin$classe)
+```
+
+     
+## Model Training Accuracy
+```{r}
+result_train <- rbind(max(fit_rpart2$results$Accuracy), max(fit_rf$results$Accuracy),
+                      max(fit_gbm$results$Accuracy))
+rownames(result_train) <- c("Rpart2", "RF", "GBM")
+colnames(result_train) <- c("Accuracy")
+kable(result_train)
+```
+     
+     
+## Results of Model Testing
+```{r}
+#results <- rbind(cm_rpart2$overall, cm_rf$overall, cm_gbm$overall, cm_adaBag$overall)
+results <- rbind(cm_rpart2$overall, cm_rf$overall, cm_gbm$overall)
+rownames(results) <- c("Rpart2", "RF","GBM")
+#,"adaBag")
+kable(results)
+```
+
+
+## Comparison of Models
+```{r}
+resamp <- resamples(list(RF=fit_rf, GBM=fit_gbm,Rpart2=fit_rpart2))
+bwplot(resamp)
+
+imp <- varImp(fit_rf)
+print(imp)
+```
+
+
+```{r rf2}
+set.seed(123)
+fit_rf2 <- train(classe ~ roll_belt + yaw_belt + magnet_dumbbell_z + magnet_dumbbell_y
+                 + pitch_forearm + pitch_belt + roll_forearm + magnet_dumbbell_x +
+                   accel_belt_z + accel_dumbbell_y + roll_dumbbell + magnet_belt_z+
+                   magnet_belt_y + accel_dumbbell_z + roll_arm + accel_forearm_x +
+                   yaw_dumbbell + gyros_dumbbell_y + gyros_belt_z + magnet_arm_y, 
+                 method="rf", data = train_fin, trControl= fit_ctrl)
+pred_rf2 <- predict(fit_rf2, newdata = test_fin)
+```
+```{r rf_pca}
+set.seed(123)
+preProc <- preProcess(train_fin, method = "pca")
+train_pca <- predict(preProc, train_fin)
+test_pca <- predict(preProc, test_fin)
+
+fit_rf_pca <- train(classe ~ ., method="rf", data = train_pca, trControl= fit_ctrl)
+pred_rf_pca <- predict(fit_rf_pca, newdata = test_pca)
+
+cm_rf2 <- confusionMatrix(pred_rf2,test_fin$classe)
+cm_rf_pca <- confusionMatrix(pred_rf_pca,test_fin$classe)
+```
+
+## Results of Random Forest Tuning 
+   
+# Training Results
+```{r}
+result2_train <- rbind(max(fit_rf$results$Accuracy), max(fit_rf2$results$Accuracy),
+                      max(fit_rf_pca$results$Accuracy))
+rownames(result2_train) <- c("RF", "RF Most Imp", "RF PCA")
+colnames(result2_train) <- c("Accuracy")
+kable(result2_train)
+```
+   
+# Testing Results
+```{r}
+results2 <- rbind(cm_rf$overall, cm_rf2$overall, cm_rf_pca$overall)
+rownames(results2) <- c("RF All","RF Most Imp", "RF PCA")
+kable(results2)
+```
+     
+## Plot of Random Forest Tuning
+```{r}
+resamp <- resamples(list(RF=fit_rf, RF2=fit_rf2, RF_PCA=fit_rf_pca))
+bwplot(resamp)
+stopCluster(cluster)
+registerDoSEQ()
+```
+## Summary
+After comparing all models that were trained using 10 fold cross-validation, the random forest model proved the most accurate.  Further tuning of this model with the 20 most important predictors as well as Principle Component Analysis resulted in slightly lower accuracy from the training data.  After predicting using the testing data set, the random forest model using 10-fold CV and 50 variables from the accelerometer measurements proved to be the most accurate with an expected out of sample error of .7%.
+
